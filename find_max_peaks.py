@@ -1,4 +1,4 @@
-def find_max_peaks(filecube, do_supercell, equiv_peak_threshold, num_H):
+def find_max_peaks(filecube, do_supercell, equiv_peak_threshold, max_num_H):
 
     import time
     from pymatgen.io.common import VolumetricData
@@ -74,7 +74,7 @@ def find_max_peaks(filecube, do_supercell, equiv_peak_threshold, num_H):
     for peak_location, peak_value, scaled_pos in zip(
         peak_locations, peak_values, np.divide(peak_locations, potential.shape)):
 
-        if cont + c < num_H:
+        if cont + c < max_num_H:
             
             cubefile.structure.append('H', scaled_pos, validate_proximity=True)
             c = c + 1 
@@ -83,7 +83,7 @@ def find_max_peaks(filecube, do_supercell, equiv_peak_threshold, num_H):
             print(f"    -> Array position: {peak_location}")
             print(f"    -> peak value: {peak_value} ({(peak_value / peak_values[0]) * 100:.4f}% of max peak)")
          
-        if cont + c == num_H:
+        if cont + c == max_num_H:
             print('WARNING! Reached max number of Hydrogens.') #Maybe it's better to distinguish when the number of maxima are cut because they were more
                                                                # than max possible number of H AND when the number maxima selected by the threshold was the same as
                                                                # the number of remaining H to put in the cell.
