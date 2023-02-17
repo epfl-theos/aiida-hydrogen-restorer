@@ -5,9 +5,12 @@ from aiida.engine import ToContext, WorkChain, while_
 
 from aiida import orm
 from aiida.common import AttributeDict
+from aiida_pseudo.data.pseudo.upf import UpfData
+
 from aiida_quantumespresso.workflows.pw.base import PwBaseWorkChain
 from aiida_quantumespresso.calculations.pp import PpCalculation
 
+from aiida_hydrogen_restorer.calculations.add_hydrogens_to_structure import add_hydrogens_to_structure
 
 class RestoreHydrogenWorkChain(WorkChain):
 
@@ -27,6 +30,7 @@ class RestoreHydrogenWorkChain(WorkChain):
         spec.input('number_hydrogen', valid_type=orm.Int, help='Number of expected hydrogen in the structure.')
         spec.input('do_supercell', valid_type=orm.Bool, default=lambda: orm.Bool(True), help='If True a supercell 3x3x3 is created.')
         spec.input('equiv_peak_threshold', valid_type=orm.Float, default=lambda: orm.Float(0.995), help='Threshold for selecting maxima peaks.')
+        spec.input('hydrogen_pseudo', valid_type=UpfData)
         spec.input('clean_workdir', valid_type=orm.Bool, default=lambda: orm.Bool(False))
 
         spec.output('final_structure', valid_type=orm.StructureData, help='The final structure.')
@@ -48,6 +52,10 @@ class RestoreHydrogenWorkChain(WorkChain):
 
         spec.exit_code(401, 'ERROR_SUB_PROCESS_FAILED_SCF',
             message='the `scf` PwBaseWorkChain sub process failed')
+        spec.exit_code(402, 'ERROR_SUB_PROCESS_FAILED_PP',
+            message='the `pp` PwBaseWorkChain sub process failed')
+        spec.exit_code(403, 'ERROR_SUB_PROCESS_FAILED_RELAX',
+            message='the `relax` PwBaseWorkChain sub process failed')
 
     @classmethod
     def get_builder_from_protocol(
@@ -60,8 +68,13 @@ class RestoreHydrogenWorkChain(WorkChain):
         overrides=None,
         **kwargs
     ):
+        overrides = {} if overrides is None else overrides
+
+        base_inputs = PwBaseWorkChain.get_protocol_inputs(protocol, overrides.get('scf', None))
+        pseudo_family = orm.load_group(base_inputs.pop('pseudo_family'))
+
         base_scf = PwBaseWorkChain.get_builder_from_protocol(
-            code=pw_code, structure=structure, protocol=protocol
+            code=pw_code, structure=structure, protocol=protocol, overrides=overrides.get('scf', None)
         )
         base_scf['pw'].pop('structure', None)
         base_scf.pop('clean_workdir', None)
@@ -74,31 +87,38 @@ class RestoreHydrogenWorkChain(WorkChain):
         pp_builder.code = pp_code
         parameters = {
             'INPUTPP': {
-                'plot_num': 11,  # electron charge density ===> what if I want also the number 11?
+                'plot_num': 11,
             },
             'PLOT': {
-                'iflag': 3,  # 3D plot
-                #'output_format': 6,  # format as gaussian cube file  (3D)
+                'iflag': 3,
             },
         }
         pp_builder.metadata.options.resources = {
             'num_machines': 1,
-            'num_mpiprocs_per_machine': 8,
-            'num_cores_per_machine': 8,
+            'num_mpiprocs_per_machine': 1,
+            'num_cores_per_machine': 1,
         }
         pp_builder.metadata.options.max_wallclock_seconds = 1800
         pp_builder.parameters = orm.Dict(parameters)
         builder.pp = pp_builder
         builder.structure = structure
         builder.number_hydrogen = orm.Int(number_hydrogen)
+        builder.hydrogen_pseudo = pseudo_family.get_pseudo('H')
 
         return builder
 
     def run_scf(self):
         """Run the `PwBaseWorkChain` that calculations the initial potential."""
+        self.ctx.current_structure = self.inputs.structure
 
         inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
         inputs.pw.structure = self.inputs.structure
+
+        parameters = inputs.pw.parameters.get_dict()
+        parameters['SYSTEM']['tot_charge'] = - (
+            self.inputs.number_hydrogen.value - self.ctx.current_structure.get_pymatgen().composition['H']
+        )
+        inputs.pw.parameters = orm.Dict(parameters)
 
         running = self.submit(PwBaseWorkChain, **inputs)
 
@@ -127,169 +147,71 @@ class RestoreHydrogenWorkChain(WorkChain):
 
         return ToContext(pp_calculation=pp_calcnode)
 
+    def inspect_pp(self):
+        """Inspect the results of the BLABLA"""
+        pp_calculation = self.ctx.pp_calculation
+    
+        if not pp_calculation.is_finished_ok:
+            return self.exit_codes.ERROR_SUB_PROCESS_FAILED_PP
+
     def add_hydrogen(self):
         """TODO"""
-        pass
+        structure = self.ctx.current_structure
+        potential_array = self.ctx.pp_calculation.outputs.output_data
 
-#         structure = self.inputs.structure
-#         potential_array = self.ctx.pp_calculation.outputs.output_data
+        results = add_hydrogens_to_structure(
+            structure, 
+            potential_array,
+            self.inputs.do_supercell,
+            self.inputs.equiv_peak_threshold,
+            self.inputs.number_hydrogen
+        )
 
-#         results = add_hydrogens_to_structure(
-#             structure, 
-#             potential_array,
-#             self.inputs.do_supercell,
-#             self.inputs.equiv_peak_threshold,
-#             self.inputs.number_hydrogen
-#         )
+        self.ctx.current_structure = results['new_structure']
 
-#         #structure = self.out('output_structure', results['new_structure'])
-#         self.ctx.current_structure = results['new_structure']
-#         self.out('final_structure', results['new_structure'])
-
-     def more_hydrogen_needed(self):
+    def more_hydrogen_needed(self):
         """Check if more hydrogen needs to be added to the structure."""
-        pass
-#         structure = self.ctx.current_structure
-#         return structure.get_pymatgen().composition['H'] != self.inputs.number_hydrogen.value
-#         #return False
+        return self.ctx.current_structure.get_pymatgen().composition['H'] != self.inputs.number_hydrogen.value
 
-#     def run_relax(self):
-#         from aiida_quantumespresso.common.types import RelaxType
-#         """Run the PwRelaxWorkChain to run a relax PwCalculation."""
-#         #inputs = AttributeDict(self.exposed_inputs(PwRelaxWorkChain))#, namespace='relax')) 
+    def run_relax(self):
+        """"""
+        inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
+        inputs.pw.structure = self.ctx.current_structure
+        
+        parameters = inputs.pw.parameters.get_dict()
+        parameters['CONTROL']['calculation'] = 'relax'
+        parameters['SYSTEM']['tot_charge'] = - (
+            self.inputs.number_hydrogen.value - self.ctx.current_structure.get_pymatgen().composition['H']
+        )
+        inputs.pw.parameters = orm.Dict(parameters)
 
-#          #inputs.metadata.call_link_label = 'relax'
-#          #inputs.structure = self.ctx.current_structure
+        inputs.pw.pseudos['H'] = self.inputs.hydrogen_pseudo
 
-#         overrides = {
-#             'pseudo_family': 'PseudoDojo/0.4/PBE/SR/standard/upf'
-#         }
-#         code = orm.load_code('qe-7.0-pw@eiger')
-#         #structure=self.ctx.current_structure,
+        settings = inputs.pw.get('settings', {})
+        settings['FIXED_COORDS'] = [
+            [False, False, False] if site.kind_name == 'H' else [True, True, True]
+            for site in self.ctx.current_structure.sites
+        ]
+        inputs.pw.settings = orm.Dict(settings)
 
-#         builder = PwRelaxWorkChain.get_builder_from_protocol(
-#             code=code,
-#             structure=self.ctx.current_structure,
-#             overrides=overrides,
-#             relax_type=RelaxType.POSITIONS
-#         )
-#         builder.base.pw.parameters['SYSTEM']['tot_charge'] = -(self.inputs.number_hydrogen.value - builder.structure.get_pymatgen().composition['H'])
-#         builder.base.pw.metadata.options.resources = {
-#             'num_machines': 4,
-#             'num_mpiprocs_per_machine': 1,
-#             'num_cores_per_mpiproc': 12,
-#         }
-#         builder.clean_workdir = orm.Bool(False)
-#         builder.base.pw.parallelization = orm.Dict({'npool': 4})
+        running = self.submit(PwBaseWorkChain, **inputs)
 
-#         fixed_coords = []
+        self.report(f'launching PwBaseWorkChain<{running.pk}> for relaxation babay.')
 
-#         for site in builder.structure.sites:
-#             if site.kind_name == 'H':
-#                 fixed_coords.append([False, False, False])
-#             else:
-#                 fixed_coords.append([True, True, True])
+        return ToContext(workchain_relax=running)
 
-#  ## CREATE LIST THAT SETS TO 'FALSE' ALL Hs COORDINATES
-#         builder.base.pw.settings = orm.Dict({'FIXED_COORDS': fixed_coords})
-#         builder.base.pw.metadata.options['account'] = 'mr32'
-
-#         builder.base.pw.parameters['CONTROL']['nstep'] = 250
-#         builder.base.pw.parameters['IONS'] = {
-#             'ion_dynamics': 'damp'
-#         }
-#         builder.base.max_iterations = orm.Int(1)
-
-
-#         # inputs.base.pw.metadata.options.resources = {
-#         #     'num_machines': 4,
-#         #     'num_mpiprocs_per_machine': 1,
-#         #     'num_cores_per_mpiproc': 12,
-#         # }
-
-#         running = self.submit(builder)
-
-#         self.report(f'launching PwRelaxWorkChain<{running.pk}> to relax H positions.')
-
-#         return ToContext(workchain_relax=running)
-
-     def inspect_relax(self):
-#         """Inspect the results of the relax calc"""
-#         relax_workchain = self.ctx.workchain_relax
+    def inspect_relax(self):
+        """Inspect the results of the relax calc"""
+        workchain_relax = self.ctx.workchain_relax
     
-#         if not relax_workchain.is_finished_ok:
-#             return self.exit_codes.ERROR_SUB_PROCESS_FAILED_RELAX
+        if not workchain_relax.is_finished_ok:
+            return self.exit_codes.ERROR_SUB_PROCESS_FAILED_RELAX
         
-#         self.ctx.current_folder = relax_workchain.outputs.remote_folder
-        pass 
-
-    # def move(self):
-
-    #     pass   
-
-#     def run_final_relax(self):
-#         from aiida_quantumespresso.common.types import RelaxType
-#         """Run the PwRelaxWorkChain to run a relax PwCalculation."""
-#         #inputs = AttributeDict(self.exposed_inputs(PwRelaxWorkChain))#, namespace='relax')) 
-
-#          #inputs.metadata.call_link_label = 'relax'
-#          #inputs.structure = self.ctx.current_structure
-
-#         overrides = {
-#             'pseudo_family': 'PseudoDojo/0.4/PBE/SR/standard/upf'
-#         }
-#         code = orm.load_code('qe-7.0-pw@daint-gpu')
-#         structure=self.ctx.current_structure,
-
-#         builder = PwRelaxWorkChain.get_builder_from_protocol(
-#             code=code,
-#             structure=structure,
-#             overrides=overrides,
-#             relax_type=RelaxType.POSITIONS
-#         )
-        
-#         builder.base.pw.metadata.options.resources = {
-#             'num_machines': 4,
-#             'num_mpiprocs_per_machine': 1,
-#             'num_cores_per_mpiproc': 12,
-#         }
-#         builder.clean_workdir = orm.Bool(False)
-#         builder.base.pw.parallelization = orm.Dict({'npool': 4})
-
-#         fixed_coords = []
-
-#         for site in builder.structure.sites:
-#             if site.kind_name == 'H':
-#                 fixed_coords.append([False, False, False])
-#             else:
-#                 fixed_coords.append([True, True, True])
-
-#  ## CREATE LIST THAT SETS TO 'FALSE' ALL Hs COORDINATES
-#         builder.base.pw.settings = orm.Dict({'FIXED_COORDS': fixed_coords})
-
-#         builder.base.pw.parameters['CONTROL']['nstep'] = 250
-#         builder.base.pw.parameters['IONS'] = {
-#             'ion_dynamics': 'damp'
-#         }
-#         builder.base.max_iterations = orm.Int(1)
-
-
-#         # inputs.base.pw.metadata.options.resources = {
-#         #     'num_machines': 4,
-#         #     'num_mpiprocs_per_machine': 1,
-#         #     'num_cores_per_mpiproc': 12,
-#         # }
-
-#         running = self.submit(builder)
-
-#         self.report(f'launching PwRelaxWorkChain<{running.pk}> to relax H positions.')
-
-#         return ToContext(workchain_relax=running)
-
+        self.ctx.current_structure = workchain_relax.outputs.output_structure
+        self.ctx.current_folder = workchain_relax.outputs.remote_folder
 
     def results(self):
-        structure=self.ctx.current_structure,
+        structure=self.ctx.current_structure
         self.out('final_structure', structure)
-        #self.ctx.current_folder = relax_workchain.outputs.remote_folder
 
-        #self.report('Sono alla fine, ma non credo')
+        self.report('Sono alla fine, ma non credo')
