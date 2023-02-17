@@ -56,7 +56,6 @@ class RestoreHydrogenWorkChain(WorkChain):
         pp_code,
         structure,
         number_hydrogen,
-        #pp_builder,
         protocol=None,
         overrides=None,
         **kwargs
