@@ -22,7 +22,7 @@ def add_hydrogens_to_structure(
                   # We search for peaks in a 3x3x3 supercell to find also peaks close to a cell edge
             supercell_size = (3,3,3)
             supercell_potential = np.tile(potential, supercell_size) 
-            peak_locations = peak_local_max(supercell_potential, min_distance=3, exclude_border=False)
+            peak_locations = peak_local_max(supercell_potential, min_distance=7, exclude_border=False)
 
             supercell_mask = (np.floor_divide(peak_locations, potential.shape) == np.array([1,1,1])).all(axis=1)
             peak_locations = peak_locations[supercell_mask, :]
@@ -30,7 +30,7 @@ def add_hydrogens_to_structure(
             peak_locations_orig = np.remainder(peak_locations, potential.shape)
 
         else:
-            peak_locations_orig = peak_local_max(potential, min_distance=3, exclude_border=False)
+            peak_locations_orig = peak_local_max(potential, min_distance=7, exclude_border=False)
 
         peak_values_orig = potential[tuple(peak_locations_orig.T)]
 
