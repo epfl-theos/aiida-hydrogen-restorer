@@ -24,7 +24,7 @@ class RestoreHydrogenWorkChain(WorkChain):
             namespace_options={'help': 'Inputs for the `PwBaseWorkChain` for the initial scf calculation.'})
         spec.expose_inputs(PpCalculation, namespace='pp',
             exclude=('parent_folder'),
-            namespace_options={'help': 'Inputs for the `PwBaseWorkChain` for the initial scf calculation.'})
+            namespace_options={'help': 'Inputs for the `pp.x` process to find electrostatic potential.'})
 
         spec.input('structure', valid_type=orm.StructureData, help='The input structure.')
         spec.input('number_hydrogen', valid_type=orm.Int, help='Number of expected hydrogen in the structure.')
@@ -39,12 +39,16 @@ class RestoreHydrogenWorkChain(WorkChain):
             cls.run_scf,
             cls.inspect_scf,
             cls.run_pp,
+            cls.inspect_pp,
             cls.add_hydrogen,
+            cls.run_relax,
+            cls.inspect_relax,
             while_(cls.more_hydrogen_needed)(
-                cls.run_relax,
-                cls.inspect_relax,
                 cls.run_pp,
+                cls.inspect_pp,
                 cls.add_hydrogen,
+                cls.run_relax,
+                cls.inspect_relax,  
             ),
             #cls.run_final_relax,
             cls.results
@@ -142,7 +146,7 @@ class RestoreHydrogenWorkChain(WorkChain):
 
         pp_calcnode = self.submit(PpCalculation, **inputs)
 
-        self.report(f'launching PwBaseWorkChain<{pp_calcnode.pk}> for initial scf.')
+        self.report(f'launching pp.x <{pp_calcnode.pk}> to find electrostatic potential.')
 
         return ToContext(pp_calculation=pp_calcnode)
 
@@ -165,8 +169,10 @@ class RestoreHydrogenWorkChain(WorkChain):
             self.inputs.equiv_peak_threshold,
             self.inputs.number_hydrogen
         )
-
+        
         self.ctx.current_structure = results['new_structure']
+        current_H = self.ctx.current_structure.get_pymatgen().composition['H']
+        self.report(f'Now there are {current_H} hydrogens.')
 
     def more_hydrogen_needed(self):
         """Check if more hydrogen needs to be added to the structure."""
@@ -183,7 +189,8 @@ class RestoreHydrogenWorkChain(WorkChain):
             self.inputs.number_hydrogen.value - self.ctx.current_structure.get_pymatgen().composition['H']
         )
         inputs.pw.parameters = orm.Dict(parameters)
-
+        parameters['CONTROL']['nstep'] = 250
+        parameters['IONS'] = {'ion_dynamics': 'damp'}
         inputs.pw.pseudos['H'] = self.inputs.hydrogen_pseudo
 
         settings = inputs.pw.get('settings', {})
@@ -213,4 +220,4 @@ class RestoreHydrogenWorkChain(WorkChain):
         structure=self.ctx.current_structure
         self.out('final_structure', structure)
 
-        self.report('Sono alla fine, ma non credo')
+        self.report('You were lucky this time')
