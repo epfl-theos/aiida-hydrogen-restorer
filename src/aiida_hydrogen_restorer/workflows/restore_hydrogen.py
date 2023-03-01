@@ -65,11 +65,10 @@ class RestoreHydrogenWorkChain(WorkChain):
         structure,
         number_hydrogen,
         protocol=None,
-        overrides=None,
+        overrides=None, #ok same
         **kwargs
     ):
         overrides = {} if overrides is None else overrides
-
         base_inputs = PwBaseWorkChain.get_protocol_inputs(protocol, overrides.get('scf', None))
         pseudo_family = orm.load_group(base_inputs.pop('pseudo_family'))
 
