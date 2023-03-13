@@ -50,9 +50,11 @@ def add_hydrogens_to_structure(
     potential = potential_array.get_array('data')
 
     #Now I want to apply the above function to the data = look for maxima
-    peak_locations, _, _, peak_locations_orig, peak_values_orig = find_peaks(
+    peak_locations, peak_values = find_peaks(
         potential, do_supercell.value, equiv_peak_threshold.value
     ) 
+    if len(peak_values) > (num_H.value - int(new_structure.composition['H'])):
+        print("Equivalent maxima are more than desired atoms, please change method.")
 
     for scaled_pos in np.divide(peak_locations, potential.shape):
 
@@ -62,8 +64,8 @@ def add_hydrogens_to_structure(
         new_structure.append('H', scaled_pos, validate_proximity=True)
 
     all_peaks = orm.ArrayData()
-    all_peaks.set_array('peak_values', peak_values_orig)
-    all_peaks.set_array('peak_positions', np.divide(peak_locations_orig, potential.shape))
+    all_peaks.set_array('peak_values', peak_values)
+    all_peaks.set_array('peak_positions', np.divide(peak_locations, potential.shape))
 
     return {
         'new_structure': orm.StructureData(pymatgen=new_structure),
