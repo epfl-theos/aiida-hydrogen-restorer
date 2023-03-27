@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Work chain to restore hydrogens to an inputs structure."""
 
-from aiida.engine import ToContext, WorkChain, while_
+from aiida.engine import ToContext, WorkChain, while_, if_
 
 from aiida import orm
 from aiida.common import AttributeDict
@@ -32,7 +32,8 @@ class RestoreHydrogenWorkChain(WorkChain):
         spec.input('equiv_peak_threshold', valid_type=orm.Float, default=lambda: orm.Float(0.995), help='Threshold for selecting maxima peaks.')
         spec.input('hydrogen_pseudo', valid_type=UpfData)
         spec.input('clean_workdir', valid_type=orm.Bool, default=lambda: orm.Bool(False))
-
+        spec.output('all_peaks', valid_type=orm.ArrayData, help='List of the maxima peaks')
+        spec.output('partial_structure', valid_type=orm.StructureData, help='The partial structure, if something goes wrong.')
         spec.output('final_structure', valid_type=orm.StructureData, help='The final structure.')
 
         spec.outline(
@@ -41,18 +42,43 @@ class RestoreHydrogenWorkChain(WorkChain):
             cls.run_pp,
             cls.inspect_pp,
             cls.add_hydrogen,
-            cls.run_relax,
-            cls.inspect_relax,
-            while_(cls.more_hydrogen_needed)(
+            while_(cls.should_add_hydrogens)(
+                cls.run_relax_hydrogens,
+                cls.inspect_relax,
                 cls.run_pp,
                 cls.inspect_pp,
                 cls.add_hydrogen,
-                cls.run_relax,
-                cls.inspect_relax,  
-            ),
-            #cls.run_final_relax,
+                ),
+            cls.run_relax_hydrogens, 
+            cls.inspect_relax,
             cls.results
         )
+
+        
+        # spec.outline(
+        #     cls.run_scf,
+        #     cls.inspect_scf,
+        #     cls.run_pp,
+        #     cls.inspect_pp,
+        #     cls.add_hydrogen,
+        #     if_(cls.too_many_maxima)(cls.partial_results).
+        #     else_(
+        #         cls.run_relax,
+        #         cls.inspect_relax, 
+        #             while_(cls.more_hydrogen_needed)(
+        #                 cls.run_pp,
+        #                 cls.inspect_pp,
+        #                 cls.add_hydrogen,
+        #                 if_(cls.too_many_maxima)
+        #                     (cls.go_further)
+        #                 .else_(cls.run_relax,
+        #                 cls.inspect_relax),  
+        #             ),
+        #         if_(cls.too_many_maxima)(cls.partial_results).
+        #         else_(cls.results)
+        #     )
+
+        # )
 
         spec.exit_code(401, 'ERROR_SUB_PROCESS_FAILED_SCF',
             message='the `scf` PwBaseWorkChain sub process failed')
@@ -109,6 +135,7 @@ class RestoreHydrogenWorkChain(WorkChain):
         builder.hydrogen_pseudo = pseudo_family.get_pseudo('H')
 
         return builder
+
 
     def run_scf(self):
         """Run the `PwBaseWorkChain` that calculations the initial potential."""
@@ -170,15 +197,35 @@ class RestoreHydrogenWorkChain(WorkChain):
             self.inputs.number_hydrogen
         )
         
-        self.ctx.current_structure = results['new_structure']
-        current_H = self.ctx.current_structure.get_pymatgen().composition['H']
-        self.report(f'Now there are {current_H} hydrogens.')
+        if self.ctx.current_structure.get_pymatgen().composition['H'] == results['new_structure'].get_pymatgen().composition['H']:
+            self.ctx.enough_H = False
+        else:
+         self.ctx.enough_H = True #
+         self.ctx.current_structure = results['new_structure']
+         self.ctx.all_peaks = results['all_peaks']
+         self.ctx.num_peaks = len(results['all_peaks'].get_array('peak_values'))
+         current_H = self.ctx.current_structure.get_pymatgen().composition['H']
+         self.report(f'Now there are {current_H} out of {self.inputs.number_hydrogen.value} hydrogens (I found {self.ctx.num_peaks} maxima).')
+    
+    def should_add_hydrogens(self):
+        
+        return self.ctx.current_structure.get_pymatgen().composition['H'] != self.inputs.number_hydrogen.value and self.ctx.enough_H == True
+                
+    # def too_many_maxima(self):
+    #     """Stop the loop (for now) if there are more equivalent maxima than H to add"""
+    #     return ((self.inputs.number_hydrogen - self.ctx.current_structure.get_pymatgen().composition['H']) < self.ctx.num_peaks and (self.inputs.number_hydrogen - self.ctx.current_structure.get_pymatgen().composition['H']) > 0 )
+    
+    # def go_further(self):
+    #     pass
 
-    def more_hydrogen_needed(self):
-        """Check if more hydrogen needs to be added to the structure."""
-        return self.ctx.current_structure.get_pymatgen().composition['H'] != self.inputs.number_hydrogen.value
 
-    def run_relax(self):
+
+    # def more_hydrogen_needed(self):
+    #     """Check if more hydrogen needs to be added to the structure."""
+    #     return self.ctx.current_structure.get_pymatgen().composition['H'] != self.inputs.number_hydrogen.value and (self.inputs.number_hydrogen - self.ctx.current_structure.get_pymatgen().composition['H']) >= self.ctx.num_peaks
+                
+    
+    def run_relax_hydrogens(self):
         """"""
         inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
         inputs.pw.structure = self.ctx.current_structure
@@ -188,9 +235,10 @@ class RestoreHydrogenWorkChain(WorkChain):
         parameters['SYSTEM']['tot_charge'] = - (
             self.inputs.number_hydrogen.value - self.ctx.current_structure.get_pymatgen().composition['H']
         )
-        inputs.pw.parameters = orm.Dict(parameters)
+        
         parameters['CONTROL']['nstep'] = 250
         parameters['IONS'] = {'ion_dynamics': 'damp'}
+        inputs.pw.parameters = orm.Dict(parameters)
         inputs.pw.pseudos['H'] = self.inputs.hydrogen_pseudo
 
         settings = inputs.pw.get('settings', {})
@@ -218,6 +266,24 @@ class RestoreHydrogenWorkChain(WorkChain):
 
     def results(self):
         structure=self.ctx.current_structure
-        self.out('final_structure', structure)
+        all_peaks = self.ctx.all_peaks
 
-        self.report('You were lucky this time')
+        if self.ctx.enough_H == True:
+            self.out('all_peaks', all_peaks) #had to, as long as I don't know how to differentiate this in the spec.output part
+            self.out('partial_structure', structure)
+            self.out('final_structure', structure)
+            self.report('Good job!')
+
+        else:
+            self.out('all_peaks', all_peaks)
+            self.out('partial_structure', structure)
+            self.report('You need to change method.')
+
+        
+        #     def partial_results(self):
+        # structure = self.ctx.current_structure
+        # all_peaks = self.ctx.all_peaks
+        # self.report(f'I don`t know where to place your H! Stopping the workchain...')
+
+        # self.out('all_peaks', all_peaks)
+        # self.out('partial_structure', structure)

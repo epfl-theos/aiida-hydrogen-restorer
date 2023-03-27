@@ -53,15 +53,17 @@ def add_hydrogens_to_structure(
     peak_locations, peak_values = find_peaks(
         potential, do_supercell.value, equiv_peak_threshold.value
     ) 
-    if len(peak_values) > (num_H.value - int(new_structure.composition['H'])):
+    if (len(peak_values) > (num_H.value - int(new_structure.composition['H']))):
         print("Equivalent maxima are more than desired atoms, please change method.")
+        pass
 
-    for scaled_pos in np.divide(peak_locations, potential.shape):
+    else:
+        for scaled_pos in np.divide(peak_locations, potential.shape):
 
-        if int(new_structure.composition['H']) == num_H.value:
-            break
+            if int(new_structure.composition['H']) == num_H.value:
+                break
 
-        new_structure.append('H', scaled_pos, validate_proximity=True)
+            new_structure.append('H', scaled_pos, validate_proximity=True)
 
     all_peaks = orm.ArrayData()
     all_peaks.set_array('peak_values', peak_values)
