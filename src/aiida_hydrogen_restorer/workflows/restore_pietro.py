@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Work chain to restore hydrogens to an inputs structure."""
 
-from aiida.engine import ToContext, WorkChain, while_, if_
+from aiida.engine import ToContext, WorkChain, while_, calcfunction
 from aiida import orm
 from aiida.common import AttributeDict
 from aiida_pseudo.data.pseudo.upf import UpfData
@@ -10,7 +10,15 @@ from aiida_quantumespresso.calculations.pp import PpCalculation
 
 from aiida_hydrogen_restorer.calculations.add_hydrogens_to_structure import add_hydrogens_to_structure
 
-class RestoreHydrogenWorkChain(WorkChain):
+@calcfunction
+def subtract_potentials(array_1, array_2):
+    difference = array_1.get_array('data') - array_2.get_array('data') 
+    potential_difference = orm.ArrayData()
+    potential_difference.set_array('data', difference)
+    return {'potential_difference': potential_difference}
+
+
+class RestorePietroWorkChain(WorkChain):
 
     @classmethod
     def define(cls, spec):
@@ -32,26 +40,19 @@ class RestoreHydrogenWorkChain(WorkChain):
         spec.input('clean_workdir', valid_type=orm.Bool, default=lambda: orm.Bool(False))
         spec.output('all_peaks', valid_type=orm.ArrayData, help='List of the maxima peaks')
         spec.output('final_structure', valid_type=orm.StructureData, help='The final structure.')
-        spec.output('info_dict', valid_type=orm.Dict, help='The dictionary with info about the steps.')
 
         spec.outline(
             cls.setup,
-            cls.run_scf,
-            cls.inspect_scf,
-            cls.run_pp,
-            cls.inspect_pp,
-            cls.add_hydrogen,
             while_(cls.should_add_hydrogens)(
-                cls.run_relax_hydrogens,
-                cls.inspect_relax,
+                cls.run_scf,
+                cls.inspect_scf,
                 cls.run_pp,
                 cls.inspect_pp,
                 cls.add_hydrogen,
-                ),
-            cls.run_relax_hydrogens, 
-            cls.inspect_relax,
+            ),
             cls.results
         )
+
         spec.exit_code(401, 'ERROR_SUB_PROCESS_FAILED_SCF',
             message='the `scf` PwBaseWorkChain sub process failed')
         spec.exit_code(402, 'ERROR_SUB_PROCESS_FAILED_PP',
@@ -61,7 +62,6 @@ class RestoreHydrogenWorkChain(WorkChain):
         spec.exit_code(501, 'WARNING_FINAL_STRUCTURE_NOT_COMPLETE',
             message='the final obtained structure does not have the required number of hydrogen.')
 
-
     @classmethod
     def get_builder_from_protocol(
         cls,
@@ -70,7 +70,7 @@ class RestoreHydrogenWorkChain(WorkChain):
         structure,
         number_hydrogen,
         protocol=None,
-        overrides=None, #ok same
+        overrides=None,
         **kwargs
     ):
         overrides = {} if overrides is None else overrides
@@ -123,54 +123,85 @@ class RestoreHydrogenWorkChain(WorkChain):
         """Run the `PwBaseWorkChain` that calculations the initial potential."""
         structure = self.ctx.current_structure
 
-        inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
-        inputs.pw.structure = structure
-
-        parameters = inputs.pw.parameters.get_dict()
+        # Full SCF with electronic charge equal to number of missing hydrogen
+        full_inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
+        full_inputs.pw.structure = structure
+        parameters = full_inputs.pw.parameters.get_dict()
         parameters['SYSTEM']['tot_charge'] = - (
-            self.inputs.number_hydrogen.value - structure.get_pymatgen().composition['H']
+            self.inputs.number_hydrogen.value - self.ctx.current_structure.get_pymatgen().composition['H']
         )
-        inputs.pw.parameters = orm.Dict(parameters)
+        full_inputs.pw.parameters = orm.Dict(parameters)
+        base_full = self.submit(PwBaseWorkChain, **full_inputs)
 
-        pw_base_node = self.submit(PwBaseWorkChain, **inputs)
-        self.report(f'launching PwBaseWorkChain<{pw_base_node.pk}> for initial scf.')
+        # Partial SCF with electronic charge equal to number of missing hydrogen minus one
+        partial_inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
+        partial_inputs.pw.structure = structure
+        partial_params = partial_inputs.pw.parameters.get_dict()
+        partial_params['SYSTEM']['tot_charge'] = - (
+            self.inputs.number_hydrogen.value - self.ctx.current_structure.get_pymatgen().composition['H']
+        ) + 1
+        partial_inputs.pw.parameters = orm.Dict(partial_params)
+        base_partial = self.submit(PwBaseWorkChain, **partial_inputs)
 
-        return ToContext(workchain_scf=pw_base_node)
+        self.report(f'launched two PwBaseWorkChain for initial scf: {base_full.pk} & {base_partial.pk}')
+
+        return ToContext(base_full=base_full, base_partial=base_partial)
 
     def inspect_scf(self):
-        """Inspect the results of the scf `PwBaseWorkChain`."""
-        scf_workchain = self.ctx.workchain_scf
+        """Inspect the results of both SCF runs."""
+        full_scf_workchain = self.ctx.base_full
+        partial_scf_workchain = self.ctx.base_partial
 
-        if not scf_workchain.is_finished_ok:
+        if any((
+            not full_scf_workchain.is_finished_ok,
+            not partial_scf_workchain.is_finished_ok,
+        )):
             return self.exit_codes.ERROR_SUB_PROCESS_FAILED_SCF
 
-        self.ctx.current_folder = scf_workchain.outputs.remote_folder
+        self.ctx.current_full_folder = full_scf_workchain.outputs.remote_folder
+        self.ctx.current_partial_folder = partial_scf_workchain.outputs.remote_folder
 
     def run_pp(self):
         """Run the `PwBaseWorkChain` that calculations the initial potential."""
-        inputs = AttributeDict(self.exposed_inputs(PpCalculation, namespace='pp'))
-        inputs.parent_folder = self.ctx.current_folder
+        full_inputs = AttributeDict(self.exposed_inputs(PpCalculation, namespace='pp'))
+        full_inputs.parent_folder = self.ctx.current_full_folder
+        pp_calc_full = self.submit(PpCalculation, **full_inputs)
 
-        pp_calc_node = self.submit(PpCalculation, **inputs)
-        self.report(f'launching pp.x <{pp_calc_node.pk}> to find electrostatic potential.')
-        
-        return ToContext(pp_calculation=pp_calc_node)
+        partial_inputs = AttributeDict(self.exposed_inputs(PpCalculation, namespace='pp'))
+        partial_inputs.parent_folder = self.ctx.current_partial_folder
+        pp_calc_partial = self.submit(PpCalculation, **partial_inputs)
+
+        self.report(
+            'launched two `pp.x` calculations to find electrostatic potential with PKs:'
+            f'<{pp_calc_full.pk}> and <{pp_calc_partial.pk}>'
+        )
+        return ToContext(pp_calc_full=pp_calc_full, pp_calc_partial=pp_calc_partial)
 
     def inspect_pp(self):
-        """Inspect the results of the `PpCalculation`"""
-        pp_calculation = self.ctx.pp_calculation
+        """Inspect the results of the BLABLA"""
+        pp_calc_full = self.ctx.pp_calc_full
+        pp_calc_partial = self.ctx.pp_calc_partial
     
-        if not pp_calculation.is_finished_ok:
+        if any((
+            not pp_calc_full.is_finished_ok,
+            not pp_calc_partial.is_finished_ok,
+        )):
             return self.exit_codes.ERROR_SUB_PROCESS_FAILED_PP
 
     def add_hydrogen(self):
-        """Add hydrogen to the current structure based on the Arianna method."""
+        """Add hydrogen to the current structure based on the Pietro method."""
         structure = self.ctx.current_structure
-        potential_array = self.ctx.pp_calculation.outputs.output_data
+        potential_array_full = self.ctx.pp_calc_full.outputs.output_data
+        potential_array_partial = self.ctx.pp_calc_partial.outputs.output_data
+
+        potential_difference = subtract_potentials(
+            array_1 = potential_array_full,
+            array_2 = potential_array_partial
+        )['potential_difference']
 
         results = add_hydrogens_to_structure(
             structure, 
-            potential_array,
+            potential_difference,
             self.inputs.do_supercell,
             self.inputs.equiv_peak_threshold,
             self.inputs.number_hydrogen
@@ -193,44 +224,6 @@ class RestoreHydrogenWorkChain(WorkChain):
             self.ctx.current_structure.get_pymatgen().composition['H'] != self.inputs.number_hydrogen.value
         )
         return not_enough_hydrogen and not self.ctx.failed_to_add_hydrogen == True
-
-    def run_relax_hydrogens(self):
-        """Run the relaxation for new structure."""
-        inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
-        inputs.pw.structure = self.ctx.current_structure
-
-        parameters = inputs.pw.parameters.get_dict()
-        parameters['CONTROL']['calculation'] = 'relax'
-        parameters['SYSTEM']['tot_charge'] = - (
-            self.inputs.number_hydrogen.value - self.ctx.current_structure.get_pymatgen().composition['H']
-        )
-        parameters['CONTROL']['nstep'] = 250
-        parameters['IONS'] = {'ion_dynamics': 'damp'}
-        inputs.pw.parameters = orm.Dict(parameters)
-        inputs.pw.pseudos['H'] = self.inputs.hydrogen_pseudo
-
-        settings = inputs.pw.get('settings', {})
-        settings['FIXED_COORDS'] = [
-            [False, False, False] if site.kind_name == 'H' else [True, True, True]
-            for site in self.ctx.current_structure.sites
-        ]
-        inputs.pw.settings = orm.Dict(settings)
-
-        running = self.submit(PwBaseWorkChain, **inputs)
-
-        self.report(f'launching PwBaseWorkChain<{running.pk}> for relaxation babay.')
-
-        return ToContext(workchain_relax=running)
-
-    def inspect_relax(self):
-        """Inspect the results of the relax calc"""
-        workchain_relax = self.ctx.workchain_relax
-
-        if not workchain_relax.is_finished_ok:
-            return self.exit_codes.ERROR_SUB_PROCESS_FAILED_RELAX
-        
-        self.ctx.current_structure = workchain_relax.outputs.output_structure
-        self.ctx.current_folder = workchain_relax.outputs.remote_folder
 
     def results(self):
         """Add the results to the outputs."""

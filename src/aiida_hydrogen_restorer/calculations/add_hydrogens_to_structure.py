@@ -42,9 +42,9 @@ def add_hydrogens_to_structure(
         
         equiv_peak_mask = peak_values_orig > peak_values_orig[0] * equiv_peak_threshold   
         peak_locations = peak_locations_orig[equiv_peak_mask]
-        peak_values = peak_values_orig[equiv_peak_mask]  #equiv_peak_mask FUNZIONA PROPRIO DA MASCHERA
+        peak_values = peak_values_orig[equiv_peak_mask]  #equiv_peak_mask 
 
-        return peak_locations, peak_values #, num_orig_peaks, peak_locations_orig, peak_values_orig
+        return peak_locations, peak_values#, peak_locations_orig, peak_values_orig
 
     new_structure = structure_data.get_pymatgen()
     potential = potential_array.get_array('data')
@@ -65,9 +65,11 @@ def add_hydrogens_to_structure(
 
             new_structure.append('H', scaled_pos, validate_proximity=True)
 
+    
     all_peaks = orm.ArrayData()
     all_peaks.set_array('peak_values', peak_values)
-    all_peaks.set_array('peak_positions', np.divide(peak_locations, potential.shape))
+    all_peaks.set_array('peak_positions', np.divide(peak_locations, potential.shape)) 
+
 
     return {
         'new_structure': orm.StructureData(pymatgen=new_structure),
