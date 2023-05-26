@@ -32,7 +32,6 @@ class RestoreHydrogenWorkChain(WorkChain):
         spec.input('clean_workdir', valid_type=orm.Bool, default=lambda: orm.Bool(False))
         spec.output('all_peaks', valid_type=orm.ArrayData, help='List of the maxima peaks')
         spec.output('final_structure', valid_type=orm.StructureData, help='The final structure.')
-        spec.output('info_dict', valid_type=orm.Dict, help='The dictionary with info about the steps.')
 
         spec.outline(
             cls.setup,
@@ -70,7 +69,7 @@ class RestoreHydrogenWorkChain(WorkChain):
         structure,
         number_hydrogen,
         protocol=None,
-        overrides=None, #ok same
+        overrides=None,
         **kwargs
     ):
         overrides = {} if overrides is None else overrides
