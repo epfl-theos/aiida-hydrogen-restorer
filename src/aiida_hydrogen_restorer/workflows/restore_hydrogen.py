@@ -2,13 +2,14 @@
 """Work chain to restore hydrogens to an inputs structure."""
 
 from aiida.engine import ToContext, WorkChain, while_, if_
-
 from aiida import orm
 from aiida.common import AttributeDict
 from aiida_pseudo.data.pseudo.upf import UpfData
-
 from aiida_quantumespresso.workflows.pw.base import PwBaseWorkChain
 from aiida_quantumespresso.calculations.pp import PpCalculation
+
+from collections import Counter
+import lowdimfinder
 
 from aiida_hydrogen_restorer.calculations.add_hydrogens_to_structure import add_hydrogens_to_structure
 
@@ -33,8 +34,10 @@ class RestoreHydrogenWorkChain(WorkChain):
         spec.input('hydrogen_pseudo', valid_type=UpfData)
         spec.input('clean_workdir', valid_type=orm.Bool, default=lambda: orm.Bool(False))
         spec.output('all_peaks', valid_type=orm.ArrayData, help='List of the maxima peaks')
-        spec.output('partial_structure', valid_type=orm.StructureData, help='The partial structure, if something goes wrong.')
+        #spec.output('partial_structure', valid_type=orm.StructureData, help='The partial structure, if something goes wrong.')
         spec.output('final_structure', valid_type=orm.StructureData, help='The final structure.')
+        spec.output('info_dict', valid_type=orm.Dict, help='The dictionary with info about the steps.')
+        
 
         spec.outline(
             cls.run_scf,
@@ -86,6 +89,9 @@ class RestoreHydrogenWorkChain(WorkChain):
             message='the `pp` PwBaseWorkChain sub process failed')
         spec.exit_code(403, 'ERROR_SUB_PROCESS_FAILED_RELAX',
             message='the `relax` PwBaseWorkChain sub process failed')
+        spec.exit_code(501, 'WARNING_FINAL_STRUCTURE_NOT_COMPLETE',
+            message='the final obtained structure does not have the required number of hydrogen.')
+
 
     @classmethod
     def get_builder_from_protocol(
@@ -141,6 +147,13 @@ class RestoreHydrogenWorkChain(WorkChain):
         """Run the `PwBaseWorkChain` that calculations the initial potential."""
         self.ctx.current_structure = self.inputs.structure
 
+        #creating dictionary for analysis of dimensionality and other important info
+        s = self.ctx.current_structure.get_ase()
+        l = lowdimfinder.LowDimFinder(s, bond_margin=0.2) 
+        info_dict = {'dimensionality_noH': collections.Counter(l.get_group_data()['dimensionality']),
+                     'chemical_formula_noH' : collections.Counter(l.get_group_data()['chemical_formula'])}
+        self.ctx.info_dict = info_dict
+
         inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
         inputs.pw.structure = self.inputs.structure
 
@@ -174,6 +187,8 @@ class RestoreHydrogenWorkChain(WorkChain):
         pp_calcnode = self.submit(PpCalculation, **inputs)
 
         self.report(f'launching pp.x <{pp_calcnode.pk}> to find electrostatic potential.')
+
+        self.ctx.info_dict['pk_ArrayData'] = [pp_calcnode.outputs.output_data.pk]
 
         return ToContext(pp_calculation=pp_calcnode)
 
@@ -270,16 +285,17 @@ class RestoreHydrogenWorkChain(WorkChain):
 
         if self.ctx.enough_H == True:
             self.out('all_peaks', all_peaks) #had to, as long as I don't know how to differentiate this in the spec.output part
-            self.out('partial_structure', structure)
+            # self.out('partial_structure', structure)
             self.out('final_structure', structure)
             self.report('Good job!')
 
         else:
             self.out('all_peaks', all_peaks)
-            self.out('partial_structure', structure)
+            self.out('final_structure', structure)
             self.report('You need to change method.')
+            return self.exit_codes.WARNING_FINAL_STRUCTURE_NOT_COMPLETE
 
-        
+        info_dict = orm.Dict(self.ctx.info_dict)
         #     def partial_results(self):
         # structure = self.ctx.current_structure
         # all_peaks = self.ctx.all_peaks
