@@ -9,8 +9,6 @@ from aiida_quantumespresso.workflows.pw.base import PwBaseWorkChain
 from aiida_quantumespresso.calculations.pp import PpCalculation
 from qe_tools import CONSTANTS
 
-from collections import Counter
-import lowdimfinder
 
 from aiida_hydrogen_restorer.calculations.add_hydrogens_to_structure import add_hydrogens_to_structure
 
@@ -136,13 +134,6 @@ class RestoreHydrogenWorkChain(WorkChain):
         structure_uuid = self.ctx.current_structure.extras['uuid_original_structure_withH']
         structure = orm.load_node(uuid=structure_uuid)
 
-        #creating dictionary for analysis of dimensionality and other important info
-        s = self.ctx.current_structure.get_ase()
-        l = lowdimfinder.LowDimFinder(s, bond_margin=0.2) 
-        info_dict = {'dimensionality_noH': collections.Counter(l.get_group_data()['dimensionality']),
-                     'chemical_formula_noH' : collections.Counter(l.get_group_data()['chemical_formula'])}
-        self.ctx.info_dict = info_dict
-
         inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
         inputs.pw.structure = structure
         inputs.pw.pseudos['H'] = self.inputs.hydrogen_pseudo
@@ -201,7 +192,7 @@ class RestoreHydrogenWorkChain(WorkChain):
             return self.exit_codes.ERROR_SUB_PROCESS_FAILED_PP
 
     def add_hydrogen(self):
-        """Add hydrogen to the current structure based on the Arianna method."""
+        """Add hydrogen to the current structure."""
         structure = self.ctx.current_structure
         potential_array = self.ctx.pp_calculation.outputs.output_data
 
@@ -299,12 +290,3 @@ class RestoreHydrogenWorkChain(WorkChain):
             self.out('all_peaks', all_peaks)
             self.out('partial_structure', structure)
             self.report('You need to change method.')
-
-        
-        #     def partial_results(self):
-        # structure = self.ctx.current_structure
-        # all_peaks = self.ctx.all_peaks
-        # self.report(f'I don`t know where to place your H! Stopping the workchain...')
-
-        # self.out('all_peaks', all_peaks)
-        # self.out('partial_structure', structure)
