@@ -39,7 +39,10 @@ class RestoreHydrogenWorkChain(WorkChain):
         spec.input('clean_workdir', valid_type=orm.Bool, default=lambda: orm.Bool(False))
         spec.output('all_peaks', valid_type=orm.ArrayData, help='List of the maxima peaks')
         spec.output('final_structure', valid_type=orm.StructureData, help='The final structure.')
+<<<<<<< HEAD
         spec.output('initial_energy', valid_type=orm.Float, help='The energy of the reference structure (with Hs).')
+=======
+>>>>>>> refs/remotes/origin/pietro
 
         spec.outline(
             cls.setup,
