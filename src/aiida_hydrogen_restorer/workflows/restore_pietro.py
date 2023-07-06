@@ -50,6 +50,8 @@ class RestorePietroWorkChain(WorkChain):
                 cls.inspect_pp,
                 cls.add_hydrogen,
             ),
+            cls.run_relax_hydrogens,
+            cls.inspect_relax,
             cls.results
         )
 
@@ -131,6 +133,9 @@ class RestorePietroWorkChain(WorkChain):
             self.inputs.number_hydrogen.value - self.ctx.current_structure.get_pymatgen().composition['H']
         )
         full_inputs.pw.parameters = orm.Dict(parameters)
+        if 'H' in structure.get_composition().keys():
+            full_inputs.pw.pseudos['H'] = self.inputs.hydrogen_pseudo
+
         base_full = self.submit(PwBaseWorkChain, **full_inputs)
 
         # Partial SCF with electronic charge equal to number of missing hydrogen minus one
@@ -141,6 +146,9 @@ class RestorePietroWorkChain(WorkChain):
             self.inputs.number_hydrogen.value - self.ctx.current_structure.get_pymatgen().composition['H']
         ) + 1
         partial_inputs.pw.parameters = orm.Dict(partial_params)
+        if 'H' in structure.get_composition().keys():
+            partial_inputs.pw.pseudos['H'] = self.inputs.hydrogen_pseudo
+
         base_partial = self.submit(PwBaseWorkChain, **partial_inputs)
 
         self.report(f'launched two PwBaseWorkChain for initial scf: {base_full.pk} & {base_partial.pk}')
@@ -224,6 +232,45 @@ class RestorePietroWorkChain(WorkChain):
             self.ctx.current_structure.get_pymatgen().composition['H'] != self.inputs.number_hydrogen.value
         )
         return not_enough_hydrogen and not self.ctx.failed_to_add_hydrogen == True
+
+    def run_relax_hydrogens(self):
+        """Run the relaxation for new structure."""
+        inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
+        inputs.pw.structure = self.ctx.current_structure
+
+        parameters = inputs.pw.parameters.get_dict()
+        parameters['CONTROL']['calculation'] = 'relax'
+        # parameters['SYSTEM']['tot_charge'] = - (
+        #     self.inputs.number_hydrogen.value - self.ctx.current_structure.get_pymatgen().composition['H']
+        # )
+        parameters['CONTROL']['nstep'] = 250
+        parameters['IONS'] = {'ion_dynamics': 'damp'}
+        inputs.pw.parameters = orm.Dict(parameters)
+        inputs.pw.pseudos['H'] = self.inputs.hydrogen_pseudo
+
+        settings = inputs.pw.get('settings', {})
+        settings['FIXED_COORDS'] = [
+            [False, False, False] if site.kind_name == 'H' else [True, True, True]
+            for site in self.ctx.current_structure.sites
+        ]
+        inputs.pw.settings = orm.Dict(settings)
+
+        running = self.submit(PwBaseWorkChain, **inputs)
+
+        self.report(f'launching PwBaseWorkChain<{running.pk}> for relaxation babay.')
+
+        return ToContext(workchain_relax=running)
+
+    def inspect_relax(self):
+        """Inspect the results of the relax calc"""
+        workchain_relax = self.ctx.workchain_relax
+
+        if not workchain_relax.is_finished_ok:
+            return self.exit_codes.ERROR_SUB_PROCESS_FAILED_RELAX
+        
+        self.ctx.current_structure = workchain_relax.outputs.output_structure
+        self.ctx.current_folder = workchain_relax.outputs.remote_folder
+    
 
     def results(self):
         """Add the results to the outputs."""

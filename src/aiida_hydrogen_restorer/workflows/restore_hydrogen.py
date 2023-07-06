@@ -1,14 +1,21 @@
 # -*- coding: utf-8 -*-
 """Work chain to restore hydrogens to an inputs structure."""
 
-from aiida.engine import ToContext, WorkChain, while_, if_
+from aiida.engine import ToContext, WorkChain, while_, if_, calcfunction
 from aiida import orm
 from aiida.common import AttributeDict
 from aiida_pseudo.data.pseudo.upf import UpfData
 from aiida_quantumespresso.workflows.pw.base import PwBaseWorkChain
 from aiida_quantumespresso.calculations.pp import PpCalculation
+from qe_tools import CONSTANTS
 
 from aiida_hydrogen_restorer.calculations.add_hydrogens_to_structure import add_hydrogens_to_structure
+
+@calcfunction
+def get_energy(energy):
+    initial_energy = energy / CONSTANTS.ry_to_ev
+    return orm.Float(initial_energy)
+
 
 class RestoreHydrogenWorkChain(WorkChain):
 
@@ -32,10 +39,11 @@ class RestoreHydrogenWorkChain(WorkChain):
         spec.input('clean_workdir', valid_type=orm.Bool, default=lambda: orm.Bool(False))
         spec.output('all_peaks', valid_type=orm.ArrayData, help='List of the maxima peaks')
         spec.output('final_structure', valid_type=orm.StructureData, help='The final structure.')
-        spec.output('info_dict', valid_type=orm.Dict, help='The dictionary with info about the steps.')
+        spec.output('initial_energy', valid_type=orm.Float, help='The energy of the reference structure (with Hs).')
 
         spec.outline(
             cls.setup,
+            cls.run_initial_scf,
             cls.run_scf,
             cls.inspect_scf,
             cls.run_pp,
@@ -70,7 +78,7 @@ class RestoreHydrogenWorkChain(WorkChain):
         structure,
         number_hydrogen,
         protocol=None,
-        overrides=None, #ok same
+        overrides=None,
         **kwargs
     ):
         overrides = {} if overrides is None else overrides
@@ -119,8 +127,26 @@ class RestoreHydrogenWorkChain(WorkChain):
         self.ctx.all_peaks = None
         self.ctx.num_peaks = None
 
+    def run_initial_scf(self):
+        """Run the `PwBaseWorkChain` that calculations the energy for the reference structure."""
+        structure_uuid = self.ctx.current_structure.extras['uuid_original_structure_withH']
+        structure = orm.load_node(uuid=structure_uuid)
+
+        inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
+        inputs.pw.structure = structure
+        inputs.pw.pseudos['H'] = self.inputs.hydrogen_pseudo
+
+        parameters = inputs.pw.parameters.get_dict()
+        
+        inputs.pw.parameters = orm.Dict(parameters)
+
+        pw_base_node = self.submit(PwBaseWorkChain, **inputs)
+        self.report(f'launching PwBaseWorkChain<{pw_base_node.pk}> for scf on the reference structure.')
+
+        return ToContext(workchain_scf_initialstructure=pw_base_node)        
+
     def run_scf(self):
-        """Run the `PwBaseWorkChain` that calculations the initial potential."""
+        """Run the `PwBaseWorkChain` that calculates the initial potential."""
         structure = self.ctx.current_structure
 
         inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
@@ -177,6 +203,8 @@ class RestoreHydrogenWorkChain(WorkChain):
         )
         if structure.get_pymatgen().composition['H'] == results['new_structure'].get_pymatgen().composition['H']:
             self.ctx.failed_to_add_hydrogen = True
+            self.ctx.all_peaks = results['all_peaks']
+
         else:
             self.ctx.current_structure = results['new_structure']
             self.ctx.all_peaks = results['all_peaks']
@@ -196,51 +224,63 @@ class RestoreHydrogenWorkChain(WorkChain):
 
     def run_relax_hydrogens(self):
         """Run the relaxation for new structure."""
-        inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
-        inputs.pw.structure = self.ctx.current_structure
 
-        parameters = inputs.pw.parameters.get_dict()
-        parameters['CONTROL']['calculation'] = 'relax'
-        parameters['SYSTEM']['tot_charge'] = - (
-            self.inputs.number_hydrogen.value - self.ctx.current_structure.get_pymatgen().composition['H']
-        )
-        parameters['CONTROL']['nstep'] = 250
-        parameters['IONS'] = {'ion_dynamics': 'damp'}
-        inputs.pw.parameters = orm.Dict(parameters)
-        inputs.pw.pseudos['H'] = self.inputs.hydrogen_pseudo
+        if self.ctx.failed_to_add_hydrogen == True or self.ctx.current_structure.get_pymatgen().composition['H'] == 0 : 
+            pass
+        else:
+            inputs = AttributeDict(self.exposed_inputs(PwBaseWorkChain, namespace='scf'))
+            inputs.pw.structure = self.ctx.current_structure
 
-        settings = inputs.pw.get('settings', {})
-        settings['FIXED_COORDS'] = [
-            [False, False, False] if site.kind_name == 'H' else [True, True, True]
-            for site in self.ctx.current_structure.sites
-        ]
-        inputs.pw.settings = orm.Dict(settings)
+            parameters = inputs.pw.parameters.get_dict()
+            parameters['CONTROL']['calculation'] = 'relax'
+            parameters['SYSTEM']['tot_charge'] = - (
+                self.inputs.number_hydrogen.value - self.ctx.current_structure.get_pymatgen().composition['H']
+            )
+            parameters['CONTROL']['nstep'] = 250
+            parameters['IONS'] = {'ion_dynamics': 'damp'}
+            inputs.pw.parameters = orm.Dict(parameters)
+            inputs.pw.pseudos['H'] = self.inputs.hydrogen_pseudo
 
-        running = self.submit(PwBaseWorkChain, **inputs)
+            settings = inputs.pw.get('settings', {})
+            settings['FIXED_COORDS'] = [
+                [False, False, False] if site.kind_name == 'H' else [True, True, True]
+                for site in self.ctx.current_structure.sites
+            ]
+            inputs.pw.settings = orm.Dict(settings)
 
-        self.report(f'launching PwBaseWorkChain<{running.pk}> for relaxation babay.')
+            running = self.submit(PwBaseWorkChain, **inputs)
 
-        return ToContext(workchain_relax=running)
+            self.report(f'launching PwBaseWorkChain<{running.pk}> for relaxation babay.')
+
+            return ToContext(workchain_relax=running)
 
     def inspect_relax(self):
-        """Inspect the results of the relax calc"""
-        workchain_relax = self.ctx.workchain_relax
+            
+            if self.ctx.failed_to_add_hydrogen == True or self.ctx.current_structure.get_pymatgen().composition['H'] == 0 : 
+                pass
+            else: 
+                """Inspect the results of the relax calc"""
+                workchain_relax = self.ctx.workchain_relax
 
-        if not workchain_relax.is_finished_ok:
-            return self.exit_codes.ERROR_SUB_PROCESS_FAILED_RELAX
-        
-        self.ctx.current_structure = workchain_relax.outputs.output_structure
-        self.ctx.current_folder = workchain_relax.outputs.remote_folder
+                if not workchain_relax.is_finished_ok:
+                    return self.exit_codes.ERROR_SUB_PROCESS_FAILED_RELAX
+                
+                self.ctx.current_structure = workchain_relax.outputs.output_structure
+                self.ctx.current_folder = workchain_relax.outputs.remote_folder
 
     def results(self):
         """Add the results to the outputs."""
         structure=self.ctx.current_structure
         all_peaks = self.ctx.all_peaks
+        energy = self.ctx.workchain_scf_initialstructure.outputs.output_parameters.get_dict()['energy']
+        initial_energy = get_energy(energy)
+
         enough_hydrogen = (
             self.ctx.current_structure.get_pymatgen().composition['H'] == self.inputs.number_hydrogen.value
         )
         self.out('all_peaks', all_peaks)
         self.out('final_structure', structure)
+        self.out('initial_energy', initial_energy)
 
         if enough_hydrogen:
             self.report('Good job!')
