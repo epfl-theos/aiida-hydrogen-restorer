@@ -40,8 +40,8 @@ class RestoreHydrogenWorkChain(WorkChain):
         spec.input('clean_workdir', valid_type=orm.Bool, default=lambda: orm.Bool(False))
         spec.output('all_peaks', valid_type=orm.ArrayData, help='List of the maxima peaks') 
         spec.output('final_structure', valid_type=orm.StructureData, help='The final structure.')
-        spec.output('info_dict', valid_type=orm.Dict, help='The dictionary with info about the steps.')
-        
+        spec.output('initial_energy', valid_type=orm.Float, help='The energy of the input structure with H.')
+
 
         spec.outline(
             cls.setup,
