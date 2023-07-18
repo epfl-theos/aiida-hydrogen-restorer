@@ -60,7 +60,8 @@ class RestoreHydrogenWorkChain(WorkChain):
                 ),
             cls.run_relax_hydrogens, 
             cls.inspect_relax,
-            cls.results
+            cls.results,
+            cls.on_terminated
         )
         spec.exit_code(401, 'ERROR_SUB_PROCESS_FAILED_SCF',
             message='the `scf` PwBaseWorkChain sub process failed')
@@ -277,16 +278,36 @@ class RestoreHydrogenWorkChain(WorkChain):
         energy = self.ctx.workchain_scf_initialstructure.outputs.output_parameters.get_dict()['energy']
         initial_energy = get_energy(energy)
 
-        enough_hydrogen = (
+        self.ctx.enough_hydrogen = (
             self.ctx.current_structure.get_pymatgen().composition['H'] == self.inputs.number_hydrogen.value
         )
         self.out('all_peaks', all_peaks)
         self.out('final_structure', structure)
         self.out('initial_energy', initial_energy)
 
-        if enough_hydrogen:
+        if self.ctx.enough_hydrogen:
             self.report('Good job!')
         else:
-            self.out('all_peaks', all_peaks)
-            self.out('partial_structure', structure)
             self.report('You need to change method.')
+            return self.exit_codes.WARNING_FINAL_STRUCTURE_NOT_COMPLETE
+
+    def on_terminated(self):
+        """Clean the working directories of all child calculations if `clean_workdir=True` in the inputs."""
+        super().on_terminated()
+
+        if self.inputs.clean_workdir.value is False or not self.ctx.enough_hydrogen:
+            self.report('remote folders will not be cleaned')
+            return
+
+        cleaned_calcs = []
+
+        for called_descendant in self.node.called_descendants:
+            if isinstance(called_descendant, orm.CalcJobNode):
+                try:
+                    called_descendant.outputs.remote_folder._clean()  # pylint: disable=protected-access
+                    cleaned_calcs.append(called_descendant.pk)
+                except (IOError, OSError, KeyError):
+                    pass
+
+        if cleaned_calcs:
+            self.report(f"cleaned remote folders of calculations: {' '.join(map(str, cleaned_calcs))}")
