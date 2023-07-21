@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Work chain to restore hydrogens to an inputs structure."""
 
-from aiida.engine import ToContext, WorkChain, while_, if_, calcfunction
+from aiida.engine import ToContext, WorkChain, while_, if_, else_, calcfunction
 from aiida import orm
 from aiida.common import AttributeDict
 from aiida_pseudo.data.pseudo.upf import UpfData
@@ -224,6 +224,7 @@ class RestoreHydrogenWorkChain(WorkChain):
             self.ctx.current_structure.get_pymatgen().composition['H'] != self.inputs.number_hydrogen.value
         )
         return not_enough_hydrogen and not self.ctx.failed_to_add_hydrogen == True
+    
 
     def run_relax_hydrogens(self):
         """Run the relaxation for new structure."""
