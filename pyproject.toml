@@ -52,6 +52,10 @@ docs = [
 
 [project.entry-points.'aiida.calculations']
 'hydrogen_restorer.add_hydrogens_to_structure' = 'aiida_hydrogen_restorer.calculations.add_hydrogens_to_structure:add_hydrogens_to_structure'
+'hydrogen_restorer.pynball' = 'aiida_hydrogen_restorer.calculations.pynball:PynballCalculation'
+
+[project.entry-points.'aiida.parsers']
+'hydrogen_restorer.pynball' = 'aiida_hydrogen_restorer.parsers.pynball:PynballParser'
 
 [project.entry-points.'aiida.workflows']
 'hydrogen_restorer.restore_hydrogen' = 'aiida_hydrogen_restorer.workflows.restore_hydrogen:RestoreHydrogenWorkChain'
