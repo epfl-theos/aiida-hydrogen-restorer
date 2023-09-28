@@ -30,7 +30,7 @@ def add_hydrogens_to_structure(
             peak_locations_orig = np.remainder(peak_locations, potential.shape)
 
         else:
-            peak_locations_orig = peak_local_max(potential, min_distance=3, exclude_border=False)
+            peak_locations_orig = peak_local_max(potential, min_distance=1, exclude_border=False)
 
         peak_values_orig = potential[tuple(peak_locations_orig.T)]
 

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Work chain to restore hydrogens to an inputs structure."""
 
-from aiida.engine import ToContext, WorkChain, while_, if_, else_, calcfunction
+from aiida.engine import ToContext, WorkChain, while_, if_, calcfunction
 from aiida import orm
 from aiida.common import AttributeDict
 from aiida_pseudo.data.pseudo.upf import UpfData
@@ -60,8 +60,7 @@ class RestoreHydrogenWorkChain(WorkChain):
                 ),
             cls.run_relax_hydrogens, 
             cls.inspect_relax,
-            cls.results,
-            cls.on_terminated
+            cls.results
         )
         spec.exit_code(401, 'ERROR_SUB_PROCESS_FAILED_SCF',
             message='the `scf` PwBaseWorkChain sub process failed')
@@ -71,7 +70,8 @@ class RestoreHydrogenWorkChain(WorkChain):
             message='the `relax` PwBaseWorkChain sub process failed')
         spec.exit_code(501, 'WARNING_FINAL_STRUCTURE_NOT_COMPLETE',
             message='the final obtained structure does not have the required number of hydrogen.')
-
+        spec.exit_code(503, 'NEW_SITE_TOO_CLOSE_TO_EXISTING_ONE',
+            message='the final obtained structure does not have the required number of hydrogen.')
 
     @classmethod
     def get_builder_from_protocol(
@@ -197,16 +197,22 @@ class RestoreHydrogenWorkChain(WorkChain):
         structure = self.ctx.current_structure
         potential_array = self.ctx.pp_calculation.outputs.output_data
 
-        results = add_hydrogens_to_structure(
-            structure, 
-            potential_array,
-            self.inputs.do_supercell,
-            self.inputs.equiv_peak_threshold,
-            self.inputs.number_hydrogen
-        )
+        try:
+            results = add_hydrogens_to_structure(
+                structure, 
+                potential_array,
+                self.inputs.do_supercell,
+                self.inputs.equiv_peak_threshold,
+                self.inputs.number_hydrogen
+            )
+        except ValueError:
+            return self.exit_codes.NEW_SITE_TOO_CLOSE_TO_EXISTING_ONE
+        
+        
         if structure.get_pymatgen().composition['H'] == results['new_structure'].get_pymatgen().composition['H']:
             self.ctx.failed_to_add_hydrogen = True
             self.ctx.all_peaks = results['all_peaks']
+
 
         else:
             self.ctx.current_structure = results['new_structure']
