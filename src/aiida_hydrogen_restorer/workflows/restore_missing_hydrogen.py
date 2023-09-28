@@ -70,16 +70,20 @@ class RestoreHydrogenPWorkChain(WorkChain):
             cls.inspect_relax,
             cls.results
         )
+
         spec.exit_code(401, 'ERROR_SUB_PROCESS_FAILED_SCF',
             message='the `scf` PwBaseWorkChain sub process failed')
         spec.exit_code(402, 'ERROR_SUB_PROCESS_FAILED_PP',
             message='the `pp` PwBaseWorkChain sub process failed')
         spec.exit_code(403, 'ERROR_SUB_PROCESS_FAILED_RELAX',
             message='the `relax` PwBaseWorkChain sub process failed')
-        spec.exit_code(501, 'WARNING_FINAL_STRUCTURE_NOT_COMPLETE',
+        spec.exit_code(501, 'WARNING_FINAL_STRUCTURE_NOT_COMPLETE', #this one shouldn't occur anymore
             message='the final obtained structure does not have the required number of hydrogen.')
         spec.exit_code(502, 'ERROR_SUB_PROCESS_FAILED_PINBALL',
             message='the `pinball` process failed')
+        spec.exit_code(503, 'NEW_SITE_TOO_CLOSE_TO_EXISTING_ONE',
+            message='the final obtained structure does not have the required number of hydrogen.')
+
 
 
     @classmethod
@@ -152,7 +156,7 @@ class RestoreHydrogenPWorkChain(WorkChain):
         self.ctx.num_peaks = None
 
     def run_initial_scf(self):
-        """Run the `PwBaseWorkChain` that calculations the energy for the reference structure, if there is one."""
+        """Run the `PwBaseWorkChain` that calculations the energy for the reference structure."""
         structure_uuid = self.ctx.current_structure.extras['uuid_original_structure_withH']
         structure = orm.load_node(uuid=structure_uuid)
 
@@ -167,7 +171,7 @@ class RestoreHydrogenPWorkChain(WorkChain):
         pw_base_node = self.submit(PwBaseWorkChain, **inputs)
         self.report(f'launching PwBaseWorkChain<{pw_base_node.pk}> for scf on the reference structure.')
 
-        return ToContext(workchain_scf_initialstructure=pw_base_node)
+        return ToContext(workchain_scf_initialstructure=pw_base_node)        
 
     def run_scf(self):
         """Run the `PwBaseWorkChain` that calculates the initial potential."""
@@ -218,13 +222,17 @@ class RestoreHydrogenPWorkChain(WorkChain):
         structure = self.ctx.current_structure
         potential_array = self.ctx.pp_calculation.outputs.output_data
 
-        results = add_hydrogens_to_structure(
-            structure, 
-            potential_array,
-            self.inputs.do_supercell,
-            self.inputs.equiv_peak_threshold,
-            self.inputs.number_hydrogen
-        )
+        try:
+            results = add_hydrogens_to_structure(
+                structure, 
+                potential_array,
+                self.inputs.do_supercell,
+                self.inputs.equiv_peak_threshold,
+                self.inputs.number_hydrogen
+            )
+        except ValueError:
+            return self.exit_codes.NEW_SITE_TOO_CLOSE_TO_EXISTING_ONE
+        
         if structure.get_pymatgen().composition['H'] == results['new_structure'].get_pymatgen().composition['H']:
             self.ctx.failed_to_add_hydrogen = True
             self.ctx.all_peaks = results['all_peaks']
